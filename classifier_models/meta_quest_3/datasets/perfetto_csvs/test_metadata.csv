@@ -1,0 +1,16 @@
+filepath,filename,room_type,scan_type,trial_number,folder,strata
+meta_scan_csvs\cleaned\blinds\blinds_motion_2_cleaned.csv,blinds_motion_2_cleaned.csv,blinds,motion,2,blinds,blinds_motion
+meta_scan_csvs\cleaned\blinds\blinds_object_2_cleaned.csv,blinds_object_2_cleaned.csv,blinds,object,2,blinds,blinds_object
+meta_scan_csvs\cleaned\blinds\blinds_person_2_cleaned.csv,blinds_person_2_cleaned.csv,blinds,person,2,blinds,blinds_person
+meta_scan_csvs\cleaned\hallway\hallway_2_cleaned.csv,hallway_2_cleaned.csv,hallway,base,2,hallway,hallway_base
+meta_scan_csvs\cleaned\hallway\hallway_motion_2_cleaned.csv,hallway_motion_2_cleaned.csv,hallway,motion,2,hallway,hallway_motion
+meta_scan_csvs\cleaned\hallway\hallway_object_2_cleaned.csv,hallway_object_2_cleaned.csv,hallway,object,2,hallway,hallway_object
+meta_scan_csvs\cleaned\hallway\hallway_person_2_cleaned.csv,hallway_person_2_cleaned.csv,hallway,person,2,hallway,hallway_person
+meta_scan_csvs\cleaned\kitchen\kitchen_10_cleaned.csv,kitchen_10_cleaned.csv,kitchen,base,10,kitchen,kitchen_base
+meta_scan_csvs\cleaned\kitchen\kitchen_motion_2_cleaned.csv,kitchen_motion_2_cleaned.csv,kitchen,motion,2,kitchen,kitchen_motion
+meta_scan_csvs\cleaned\kitchen\kitchen_object_2_cleaned.csv,kitchen_object_2_cleaned.csv,kitchen,object,2,kitchen,kitchen_object
+meta_scan_csvs\cleaned\kitchen\kitchen_person_3_cleaned.csv,kitchen_person_3_cleaned.csv,kitchen,person,3,kitchen,kitchen_person
+meta_scan_csvs\cleaned\lab\lab_2_cleaned.csv,lab_2_cleaned.csv,lab,base,2,lab,lab_base
+meta_scan_csvs\cleaned\lab\lab_motion_2_cleaned.csv,lab_motion_2_cleaned.csv,lab,motion,2,lab,lab_motion
+meta_scan_csvs\cleaned\lab\lab_object_2_cleaned.csv,lab_object_2_cleaned.csv,lab,object,2,lab,lab_object
+meta_scan_csvs\cleaned\lab\lab_person_2_cleaned.csv,lab_person_2_cleaned.csv,lab,person,2,lab,lab_person

@@ -1,0 +1,17 @@
+﻿Total Resident Memory on Device,Value
+,454.563
+
+Allocated Memory Breakdown
+Category,Allocated(MB),Resident(MB)
+"Android Runtime",1183.535,6.129
+"Executables & Mapped",785.137,215.168
+"Graphics (Estimated)",445.272,
+"Native",235.321,112.024
+"Untracked*",142.131,
+"Managed",50.862,50.144
+
+Managed Memory Breakdown
+Category,Allocated(MB),Resident(MB)
+"Virtual Machine",44.874,44.710
+"Empty Heap Space",4.230,3.675
+"Objects",1.759,1.759

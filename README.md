@@ -1,11 +1,11 @@
 # XR Defense
 
-This repository hosts the BURGS Project "Exploting Power Telemetry to Expose XR User Environmental Information". This repository hosts all of the team's work to investigate how performance indicators can be exploited to expose an XR User's location type. The project began with the an AR headset called the Magic Leap 2. We are expanding the work to alternative headsets and XR design. 
+This repository hosts the BURGS Project "Spatial Seer: Exploiting Telemetry to Expose XR User Environment". This repository hosts the team's work to investigate how performance metrics can be exploited to expose an XR user's location type. The project utilizes the Magic Leap 2 and Meta Quest 3. We used Unity to develop our entrypoint for our cyber attack. 
 
 Author(s): 
 Allie Craddock (alliec45@vt.edu) | 
-Casie Peng (casiepeng@vt.edu) | 
 Gayatri Kamtala (gayatrikam@vt.edu) |
+Casie Peng (casiepeng@vt.edu) | 
 Claire Shin (cshinh@vt.edu)
 
 # Repository Structure 
@@ -66,7 +66,6 @@ Claire Shin (cshinh@vt.edu)
 - [Matplotlib Library](https://matplotlib.org/stable/index.html)
 
 # Future Goals: 
-1. Cross Validate across alternative profilers + VR headsets
-2. Develop more robust dataset
-3. Optimize SVM 
-4. Write workshop paper for Fall 2025 conferences 
+1. Develop event-based API to automatically export data 
+2. Cross-validate findings for Mixed Reality and Virtual Reality programs
+3. Establish more room types for our machine learning models
