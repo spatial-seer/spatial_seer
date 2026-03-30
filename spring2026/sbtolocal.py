@@ -3,6 +3,8 @@ import io
 import os
 from supabase import create_client, Client
 
+# **THIS IS FOR THE EXFILTRATED DATA TABLE IN SUPABASE**
+
 # Load variables from local .env file without extra dependencies
 def load_local_env(env_path: str = ".env") -> None:
     if not os.path.exists(env_path):
