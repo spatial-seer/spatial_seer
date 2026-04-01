@@ -4,7 +4,7 @@ using System.Text;
 using UnityEngine;
 using UnityEngine.Networking;
 using Unity.Profiling;
-using Unity.XR.Oculus; // Required for the PerfMetrics API
+using Unity.XR.Oculus;
 
 public class HardwareSpy : MonoBehaviour
 {
@@ -13,9 +13,9 @@ public class HardwareSpy : MonoBehaviour
     public float samplingRate = 0.1f;
     public int captureDuration = 10;
 
-    [Header("Supabase Hardcoded Keys")]
-    // PASTE YOUR KEYS HERE OR IN THE UNITY INSPECTOR
-    // URL requires the /rest/v1/(table name) extension
+    // PRIVATE variables mean the Unity Inspector cannot see or overwrite them!
+
+    // paste the keys in when you want to use it
     private string supabaseBaseUrl = "";
     private string supabaseKey = "";
 
@@ -23,22 +23,23 @@ public class HardwareSpy : MonoBehaviour
 
     // Unity Profilers (Release-Safe)
     ProfilerRecorder totalUsedMemoryRecorder;
-    ProfilerRecorder gcAllocatedInFrameRecorder;
-    ProfilerRecorder drawCallsRecorder;
+    ProfilerRecorder mainThreadTimeRecorder;
 
     // Android Native Hooks
+    private AndroidJavaObject currentActivity;
     private AndroidJavaObject batteryManager;
     private bool isAndroid;
 
-    // Timing Jitter
-    private float lastTime = 0f;
+    // Frame Timing Jitter
+    private float frameTimeAccumulator = 0f;
+    private int frameCount = 0;
+    private float worstFrameTime = 0f;
+    private float bestFrameTime = float.MaxValue;
 
     void Awake()
     {
         DontDestroyOnLoad(this.gameObject);
         InitializeAndroidHooks();
-
-        // Enable the deep CPU/GPU metric tracking
         Stats.PerfMetrics.EnablePerfMetrics(true);
     }
 
@@ -51,14 +52,14 @@ public class HardwareSpy : MonoBehaviour
             {
                 using (AndroidJavaClass unityPlayer = new AndroidJavaClass("com.unity3d.player.UnityPlayer"))
                 {
-                    AndroidJavaObject activity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity");
-                    batteryManager = activity.Call<AndroidJavaObject>("getSystemService", "batterymanager");
-                    Debug.Log("HARDWARE SPY: Android BatteryManager hooked successfully.");
+                    currentActivity = unityPlayer.GetStatic<AndroidJavaObject>("currentActivity");
+                    batteryManager = currentActivity.Call<AndroidJavaObject>("getSystemService", "batterymanager");
+                    Debug.Log("HARDWARE SPY: Android Hooks initialized successfully.");
                 }
             }
             catch (Exception e)
             {
-                Debug.LogWarning("HARDWARE SPY: Failed to hook Android BatteryManager: " + e.Message);
+                Debug.LogWarning("HARDWARE SPY: Failed to hook Android APIs: " + e.Message);
             }
         }
     }
@@ -66,22 +67,35 @@ public class HardwareSpy : MonoBehaviour
     void OnEnable()
     {
         totalUsedMemoryRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Memory, "Total Used Memory");
-        gcAllocatedInFrameRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Memory, "GC Allocated In Frame");
-        drawCallsRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Render, "Draw Calls Count");
+        mainThreadTimeRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Internal, "Main Thread", 15);
     }
 
     void OnDisable()
     {
         if (totalUsedMemoryRecorder.Valid) totalUsedMemoryRecorder.Dispose();
-        if (gcAllocatedInFrameRecorder.Valid) gcAllocatedInFrameRecorder.Dispose();
-        if (drawCallsRecorder.Valid) drawCallsRecorder.Dispose();
+        if (mainThreadTimeRecorder.Valid) mainThreadTimeRecorder.Dispose();
+    }
+
+    void Update()
+    {
+        float dt = Time.unscaledDeltaTime;
+        frameTimeAccumulator += dt;
+        frameCount++;
+        if (dt > worstFrameTime) worstFrameTime = dt;
+        if (dt < bestFrameTime) bestFrameTime = dt;
+    }
+
+    void ResetFrameMetrics()
+    {
+        frameTimeAccumulator = 0f;
+        frameCount = 0;
+        worstFrameTime = 0f;
+        bestFrameTime = float.MaxValue;
     }
 
     IEnumerator Start()
     {
-        // Build the CSV Header including the new CPU/GPU metrics
-        csvData.AppendLine("Timestamp,DeltaTimeJitter,TotalUsedMem,GCAllocated,DrawCalls,CpuUtil,GpuUtil,AppCpuTime,BatteryCurrentMicroAmps");
-
+        csvData.AppendLine("Timestamp,TotalUsedMem,CpuUtil,GpuUtil,BatteryMicroAmps,BatteryTemp,BatteryLevel,AvgFPS,WorstFrameMs,BestFrameMs,MainThreadMs");
         yield return StartCoroutine(AttackRoutine());
     }
 
@@ -92,45 +106,58 @@ public class HardwareSpy : MonoBehaviour
 
         Debug.Log("HARDWARE SPY: Commencing side-channel telemetry capture...");
         float startTime = Time.time;
-        lastTime = Time.realtimeSinceStartup;
+        ResetFrameMetrics();
 
         while (Time.time < startTime + captureDuration)
         {
+            yield return new WaitForSeconds(samplingRate);
             float currentTime = Time.realtimeSinceStartup;
 
-            // 1. Timing Jitter (Micro-stutters from spatial meshing)
-            float frameJitter = currentTime - lastTime;
-            lastTime = currentTime;
+            // 1. Frame Timing Jitter
+            float avgFrameTime = (frameCount > 0) ? (frameTimeAccumulator / frameCount) : 0f;
+            float avgFps = (avgFrameTime > 0) ? (1f / avgFrameTime) : 0f;
+            float worstMs = worstFrameTime * 1000f;
+            float bestMs = (bestFrameTime < float.MaxValue) ? bestFrameTime * 1000f : 0f;
 
-            // 2. Unity Profiler Metrics (Release Safe)
+            // 2. Unity Profiler Metrics
             long usedMem = totalUsedMemoryRecorder.LastValue;
-            long gcAlloc = gcAllocatedInFrameRecorder.LastValue;
-            long drawCalls = drawCallsRecorder.LastValue;
+            double mainThreadMs = mainThreadTimeRecorder.LastValue * (1e-6);
 
-            // 3. Oculus PerfMetrics (CPU/GPU Utilization)
+            // 3. Oculus Compute Metrics
             float cpuUtil = Stats.PerfMetrics.CPUUtilizationAverage;
             float gpuUtil = Stats.PerfMetrics.GPUUtilization;
-            float appCpuTime = Stats.PerfMetrics.AppCPUTime;
 
-            // 4. Android Power Metrics
+            // 4. Android Power & Thermal Metrics
             int currentMicroAmps = 0;
-            if (isAndroid && batteryManager != null)
+            float batteryTemp = 0f;
+            float batteryLevel = SystemInfo.batteryLevel;
+
+            if (isAndroid && currentActivity != null && batteryManager != null)
             {
                 try
                 {
-                    // BATTERY_PROPERTY_CURRENT_NOW = 2
                     currentMicroAmps = batteryManager.Call<int>("getIntProperty", 2);
+
+                    using (AndroidJavaObject intentFilter = new AndroidJavaObject("android.content.IntentFilter", "android.intent.action.BATTERY_CHANGED"))
+                    using (AndroidJavaObject batteryIntent = currentActivity.Call<AndroidJavaObject>("registerReceiver", null, intentFilter))
+                    {
+                        if (batteryIntent != null)
+                        {
+                            int tempRaw = batteryIntent.Call<int>("getIntExtra", "temperature", 0);
+                            batteryTemp = tempRaw / 10f;
+                        }
+                    }
                 }
                 catch { }
             }
 
-            // Append to payload
-            csvData.AppendLine($"{currentTime:F4},{frameJitter:F6},{usedMem},{gcAlloc},{drawCalls},{cpuUtil:F4},{gpuUtil:F4},{appCpuTime:F6},{currentMicroAmps}");
+            // Append Row
+            csvData.AppendLine($"{currentTime:F4},{usedMem},{cpuUtil:F4},{gpuUtil:F4},{currentMicroAmps},{batteryTemp:F2},{batteryLevel:F2},{avgFps:F2},{worstMs:F2},{bestMs:F2},{mainThreadMs:F4}");
 
-            yield return new WaitForSeconds(samplingRate);
+            ResetFrameMetrics();
         }
 
-        Debug.Log("HARDWARE SPY: Capture complete. Exfiltrating to power_data...");
+        Debug.Log("HARDWARE SPY: Capture complete. Exfiltrating...");
         yield return StartCoroutine(UploadToSupabase());
     }
 
@@ -138,16 +165,12 @@ public class HardwareSpy : MonoBehaviour
     {
         if (string.IsNullOrEmpty(supabaseBaseUrl) || string.IsNullOrEmpty(supabaseKey) || supabaseBaseUrl.Contains("YOUR_SUPABASE"))
         {
-            Debug.LogError("HARDWARE SPY: Invalid Supabase credentials. Aborting upload.");
+            Debug.LogError("HARDWARE SPY: Invalid Supabase credentials.");
             yield break;
         }
 
         string cleanCsv = csvData.ToString().Replace("\r", "").Replace("\n", "\\n");
-
-        string jsonPayload = "{" +
-            "\"device_id\": \"" + SystemInfo.deviceUniqueIdentifier + "\"," +
-            "\"csv_dump\": \"" + cleanCsv + "\"" +
-        "}";
+        string jsonPayload = "{\"device_id\": \"" + SystemInfo.deviceUniqueIdentifier + "\", \"csv_dump\": \"" + cleanCsv + "\"}";
 
         using (UnityWebRequest www = new UnityWebRequest(supabaseBaseUrl, "POST"))
         {
@@ -162,15 +185,8 @@ public class HardwareSpy : MonoBehaviour
 
             yield return www.SendWebRequest();
 
-            if (www.result == UnityWebRequest.Result.Success)
-            {
-                Debug.Log("HARDWARE SPY: Side-channel data successfully exfiltrated!");
-                csvData.Clear();
-            }
-            else
-            {
-                Debug.LogError("HARDWARE SPY: Exfiltration Failed: " + www.error + " | Response: " + www.downloadHandler.text);
-            }
+            if (www.result == UnityWebRequest.Result.Success) { Debug.Log("HARDWARE SPY: Exfiltrated!"); csvData.Clear(); }
+            else { Debug.LogError("HARDWARE SPY: Failed: " + www.error); }
         }
     }
 }
