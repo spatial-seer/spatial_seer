@@ -116,26 +116,9 @@ public class HardwareSpy : MonoBehaviour
         }
     }
 
-    private float ReadSocTemperatureCelsius()
-    {
-        try
-        {
-            string rawTemp = File.ReadAllText("/sys/class/thermal/thermal_zone0/temp");
-            if (long.TryParse(rawTemp.Trim(), out long milliCelsius))
-            {
-                return milliCelsius / 1000f;
-            }
-        }
-        catch
-        {
-        }
-
-        return 0f;
-    }
-
     IEnumerator Start()
     {
-        csvData.AppendLine("Timestamp,TotalUsedMem,CpuUtil,GpuUtil,BatteryMicroAmps,BatteryTemp,BatteryLevel,BatteryVoltageMv,ScreenBrightness,SocTempC,AvgFPS,WorstFrameMs,BestFrameMs,MainThreadMs,GCAllocRate,FrameTimeStdDev,CpuClockFreq");
+        csvData.AppendLine("Timestamp,TotalUsedMem,CpuUtil,GpuUtil,BatteryMicroAmps,BatteryTemp,BatteryLevel,BatteryVoltageMv,ScreenBrightness,AvgFPS,WorstFrameMs,BestFrameMs,MainThreadMs,GCAllocRate,FrameTimeStdDev,CpuClockFreq");
         yield return StartCoroutine(AttackRoutine());
     }
 
@@ -192,7 +175,6 @@ public class HardwareSpy : MonoBehaviour
             float batteryLevel = SystemInfo.batteryLevel;
             int batteryVoltageMv = 0;
             float screenBrightness = Screen.brightness;
-            float socTempC = 0f;
 
             if (isAndroid && currentActivity != null && batteryManager != null)
             {
@@ -218,11 +200,8 @@ public class HardwareSpy : MonoBehaviour
             // 5. CPU Clock Frequency
             long cpuClockFreq = ReadCpuClockFreq();
 
-            // 6. SoC Thermal Zone (Fast Heat Channel)
-            socTempC = ReadSocTemperatureCelsius();
-
             // Append Row
-            csvData.AppendLine($"{currentTime:F4},{usedMem},{cpuUtil:F4},{gpuUtil:F4},{currentMicroAmps},{batteryTemp:F2},{batteryLevel:F2},{batteryVoltageMv},{screenBrightness:F3},{socTempC:F2},{avgFps:F2},{worstMs:F2},{bestMs:F2},{mainThreadMs:F4},{gcAllocRate},{frameTimeStdDev:F6},{cpuClockFreq}");
+            csvData.AppendLine($"{currentTime:F4},{usedMem},{cpuUtil:F4},{gpuUtil:F4},{currentMicroAmps},{batteryTemp:F2},{batteryLevel:F2},{batteryVoltageMv},{screenBrightness:F3},{avgFps:F2},{worstMs:F2},{bestMs:F2},{mainThreadMs:F4},{gcAllocRate},{frameTimeStdDev:F6},{cpuClockFreq}");
 
             ResetFrameMetrics();
         }
