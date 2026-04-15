@@ -4,3 +4,4 @@
 /meta_scan_csvs/bad_data
 
 *.env
+vr_hardware_master_dataset.csv
