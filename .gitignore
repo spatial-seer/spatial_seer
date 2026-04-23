@@ -5,3 +5,4 @@
 
 *.env
 vr_hardware_master_dataset.csv
+*.pkl
