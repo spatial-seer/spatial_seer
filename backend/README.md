@@ -8,8 +8,12 @@ Real-time FastAPI inference service. A Supabase Database Webhook on the
 ## Files
 
 - `main.py` — FastAPI app with `POST /webhook/predict` and `GET /health`.
-- `create_dummy_model.py` — Trains a placeholder XGBoost model so the API can
-  boot before the real model is ready.
+- `create_dummy_model.py` — Trains placeholder MiniRocket classifiers
+  (via `aeon`) against the real labeled CSV so the API boots with a
+  representative model before the final notebook trainer is ready.
+- `current_model.pkl` — joblib bundle produced by `create_dummy_model.py`
+  or the real trainer (see "Model bundle contract" below).
+- `ROADMAP.md` — Living plan + decision log for ongoing backend changes.
 - `requirements.txt` — Pinned dependency list.
 - `.env.example` — Template for Supabase credentials.
 
@@ -77,17 +81,39 @@ Supabase sends a JSON body shaped like:
 The endpoint reads `record`, drops `db_id` and `location`, runs the model,
 and inserts `{ trial_id, predicted_room }` into `live_predictions`.
 
+## Time-series inference (MiniRocket era)
+
+Each `hardware_data` row is a **single multivariate time-series instance**
+— the N rows inside `csv_dump` are the temporal axis of one scan, not N
+independent predictions. The server preprocesses every inbound scan to
+match the trainer exactly:
+
+1. Parse `csv_dump` as CSV.
+2. Drop metadata columns (`db_id`, `location`).
+3. Require the `Timestamp` column; sort ascending. **A missing Timestamp
+   is a 400** — we can't match training order without it.
+4. Reindex to the bundle's `channel_names` (missing channels → zero-fill,
+   one-time warning per channel).
+5. Truncate to `series_length` rows (or edge-pad if the scan is shorter,
+   with a one-time warning).
+6. Reshape to `(1, n_channels, series_length)` `float32`.
+7. Call each head's `.predict()` → one label per head, no majority vote.
+
+Confidence comes from `predict_proba` when available, otherwise a
+softmax over `decision_function` (aeon's `MiniRocketClassifier` uses
+the latter path via `RidgeClassifierCV`).
+
 ## Multi-head predictions
 
-The model bundle supports multiple prediction heads. The current heads are:
+The bundle supports multiple heads. Current heads:
 
 | Head | DB column | Example output |
 | --- | --- | --- |
 | `room` | `predicted_room` | `kitchen`, `hallway` |
 | `location` | `predicted_location` | `Floor3Kitchen`, `Outside3102` |
 
-If you haven't already, add the `predicted_location` column to the
-`live_predictions` table:
+If you haven't already, add the `predicted_location` column to
+`live_predictions`:
 
 ```sql
 alter table public.live_predictions
@@ -96,12 +122,11 @@ alter table public.live_predictions
 
 To add a third head later (e.g. `noise_type`):
 
-1. Train a classifier for it in `create_dummy_model.py` under
-   `heads["noise_type"]`.
+1. Train a classifier for it in `create_dummy_model.py` (or the real
+   trainer) under `heads["noise_type"]`.
 2. Add `"noise_type": "predicted_noise_type"` to `HEAD_TO_COLUMN` in
    `main.py`.
-3. Run `alter table public.live_predictions add column
-   predicted_noise_type text;`.
+3. `alter table public.live_predictions add column predicted_noise_type text;`.
 
 No other API changes needed.
 
@@ -122,17 +147,33 @@ alter table public.live_predictions
 After this, re-delivering the same webhook payload will update the
 existing row rather than insert a new one.
 
-## Swapping the real model in
+## Model bundle contract
 
-`main.py` loads a bundle with this shape:
+`main.py` loads a joblib-dumped dict with this shape:
 
 ```python
 {
-    "model": <fitted estimator with .predict>,
-    "label_encoder": <sklearn LabelEncoder>,
-    "feature_names": ["TotalUsedMem", "CpuUtil", ...],
+    "channel_names":  ["GpuUtil", "CpuUtil", ...],   # ordered, defines channel axis
+    "series_length":  int,                             # truncation target
+    "preprocessing":  {"method": "truncate", "sort_by": "Timestamp"},
+    "heads": {
+        "room":     {"model": <est>, "label_encoder": <LabelEncoder>},
+        "location": {"model": <est>, "label_encoder": <LabelEncoder>},
+    },
+    "kind": "minirocket-aeon-v1",   # free-form version tag
 }
 ```
 
-Save a real bundle to `current_model.pkl` (or set `MODEL_PATH`) and restart
-uvicorn. No API changes required.
+- Each head's `model` must accept `.predict(X3d)` where `X3d.shape ==
+  (1, len(channel_names), series_length)` and return an integer array of
+  length 1. aeon's `MiniRocketClassifier` fits this out of the box.
+- `label_encoder` must expose `.inverse_transform([int]) -> [str]`.
+- `feature_names` is accepted as a back-compat alias for `channel_names`.
+- `series_length` **must** be set at training time — the server refuses
+  to load a bundle without it.
+- `preprocessing.method` must be `"truncate"`; any other value is a
+  startup error. `preprocessing.sort_by` defaults to `"Timestamp"` if
+  omitted.
+
+Drop a real bundle at `current_model.pkl` (or point `MODEL_PATH` at it)
+and restart uvicorn. No API, DB, or frontend changes required.

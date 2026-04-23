@@ -3,5 +3,5 @@ uvicorn[standard]
 supabase
 pandas
 scikit-learn
-xgboost
+aeon
 python-dotenv
