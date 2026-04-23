@@ -3,8 +3,6 @@ import io
 import pandas as pd
 from supabase import create_client, Client
 
-SUPABASE_URL = "https://bkbykdicbsxeptltofvl.supabase.co"
-SUPABASE_KEY = "sb_publishable_H9JMQP7SVfTem4DlbC6k0A_5_pwwZtE"
 
 OUTPUT_CSV = "spatial_seer_all_rooms_v2.csv"   # new file, old one untouched
 PAGE_SIZE  = 100

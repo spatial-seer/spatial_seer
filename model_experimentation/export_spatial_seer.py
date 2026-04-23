@@ -14,8 +14,7 @@ import pandas as pd
 from supabase import create_client, Client
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-SUPABASE_URL = "https://bkbykdicbsxeptltofvl.supabase.co"   # ← replace
-SUPABASE_KEY = "sb_publishable_H9JMQP7SVfTem4DlbC6k0A_5_pwwZtE"             # ← replace
+
 
 OUTPUT_CSV   = "spatial_seer_all_rooms.csv"
 PAGE_SIZE    = 100          # rows per Supabase page (max 1000; keep lower for large csv_dumps)
