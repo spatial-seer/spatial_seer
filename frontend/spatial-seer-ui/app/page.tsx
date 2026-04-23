@@ -8,6 +8,7 @@ type LivePrediction = {
   created_at: string;
   trial_id: number | null;
   predicted_room: string;
+  predicted_location: string | null;
 };
 
 const SUPABASE_URL = process.env.NEXT_PUBLIC_SUPABASE_URL;
@@ -129,7 +130,7 @@ export default function Home() {
     async function bootstrap() {
       const { data, error: fetchError } = await supabase!
         .from("live_predictions")
-        .select("id, created_at, trial_id, predicted_room")
+        .select("id, created_at, trial_id, predicted_room, predicted_location")
         .order("created_at", { ascending: false })
         .limit(HISTORY_LIMIT);
 
@@ -199,6 +200,11 @@ export default function Home() {
         <h1 className="text-center text-6xl font-black uppercase tracking-tight sm:text-8xl">
           {latest ? theme.label : status === "loading" ? "…" : "No data yet"}
         </h1>
+        {latest?.predicted_location && (
+          <div className="rounded-full bg-black/25 px-4 py-1.5 font-mono text-sm tracking-wide ring-1 ring-white/20">
+            {latest.predicted_location}
+          </div>
+        )}
         {latest ? (
           <div className="mt-2 flex flex-wrap items-center justify-center gap-x-6 gap-y-1 text-sm opacity-90">
             <span>
@@ -236,13 +242,14 @@ export default function Home() {
                 <th className="px-5 py-3">Time</th>
                 <th className="px-5 py-3">Trial</th>
                 <th className="px-5 py-3">Predicted room</th>
+                <th className="px-5 py-3">Predicted location</th>
               </tr>
             </thead>
             <tbody className="divide-y divide-zinc-800">
               {predictions.length === 0 && status !== "missing-env" && (
                 <tr>
                   <td
-                    colSpan={4}
+                    colSpan={5}
                     className="px-5 py-10 text-center text-zinc-500"
                   >
                     {status === "loading"
@@ -278,6 +285,11 @@ export default function Home() {
                       >
                         {rowTheme.label}
                       </span>
+                    </td>
+                    <td className="px-5 py-3 font-mono text-zinc-300">
+                      {p.predicted_location ?? (
+                        <span className="text-zinc-600">—</span>
+                      )}
                     </td>
                   </tr>
                 );

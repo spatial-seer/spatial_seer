@@ -6,14 +6,23 @@ Supabase Database Webhook (on insert to `hardware_data`)
         -> load `current_model.pkl` via joblib
         -> insert prediction into `live_predictions`
 
-The model bundle format is intentionally decoupled from this file so the
-classifier can be swapped without touching the API layer. Any artifact saved
-by `create_dummy_model.py` (or a future real trainer) with the shape
+The model bundle is a multi-head contract: one shared feature list, plus
+an arbitrary number of prediction "heads" (each a classifier + label
+encoder). Every head listed in `HEAD_TO_COLUMN` is predicted per webhook
+and written to the corresponding column in `live_predictions`. Adding a
+new prediction target is therefore a bundle+schema change, not an API
+change.
 
-    {"model": <estimator>, "label_encoder": <LabelEncoder>,
-     "feature_names": [str, ...]}
+Expected bundle shape:
 
-will work here.
+    {
+        "feature_names": ["TotalUsedMem", "CpuUtil", ...],
+        "heads": {
+            "room":     {"model": <est>, "label_encoder": <LabelEncoder>},
+            "location": {"model": <est>, "label_encoder": <LabelEncoder>},
+        },
+        "kind": "<free-form version tag>",
+    }
 """
 
 from __future__ import annotations
@@ -44,6 +53,17 @@ CSV_DUMP_COLUMN = "csv_dump"
 # happens to include them. `db_id` and `location` are the originals the
 # user flagged; both are metadata, not features.
 DROP_COLUMNS = ("db_id", "location")
+
+# Mapping from bundle head name -> live_predictions column name. A head
+# only gets persisted if it appears both here AND in the loaded bundle.
+# To add a third prediction target (e.g. noise_type):
+#   1. Train the head in create_dummy_model.py under heads["noise_type"].
+#   2. Add "noise_type": "predicted_noise_type" to this dict.
+#   3. `alter table public.live_predictions add column predicted_noise_type text;`
+HEAD_TO_COLUMN: dict[str, str] = {
+    "room": "predicted_room",
+    "location": "predicted_location",
+}
 
 _state: dict[str, Any] = {"model_bundle": None, "supabase": None}
 
@@ -94,11 +114,34 @@ def _get_supabase_client() -> Client:
 
 
 def _load_model_bundle(path: str) -> dict[str, Any]:
+    """Load and validate a multi-head model bundle.
+
+    Raises a clear error if the bundle is the legacy single-head shape
+    (`{"model", "label_encoder", ...}`) so the operator knows to retrain
+    with the new `create_dummy_model.py`.
+    """
     bundle = joblib.load(path)
-    required = {"model", "label_encoder", "feature_names"}
+
+    if "heads" not in bundle and "model" in bundle:
+        raise RuntimeError(
+            f"Model bundle at {path} uses the legacy single-head format "
+            "(expected top-level 'heads'). Re-run `python create_dummy_model.py` "
+            "or retrain your real model with the new multi-head contract."
+        )
+
+    required = {"feature_names", "heads"}
     missing = required - set(bundle)
     if missing:
         raise RuntimeError(f"Model bundle at {path} is missing keys: {missing}")
+
+    heads = bundle["heads"]
+    if not isinstance(heads, dict) or not heads:
+        raise RuntimeError(f"Model bundle 'heads' must be a non-empty dict, got: {heads!r}")
+    for head_name, head in heads.items():
+        if not isinstance(head, dict) or {"model", "label_encoder"} - set(head):
+            raise RuntimeError(
+                f"Head '{head_name}' must be a dict with 'model' and 'label_encoder'."
+            )
     return bundle
 
 
@@ -232,12 +275,28 @@ def _write_prediction(supabase: Client, row: dict[str, Any]) -> str | None:
 @app.get("/health")
 def health() -> dict[str, Any]:
     bundle = _state.get("model_bundle")
+    heads = list(bundle["heads"].keys()) if bundle else None
     return {
         "ok": True,
         "model_loaded": bundle is not None,
         "model_kind": bundle.get("kind") if bundle else None,
+        "heads": heads,
+        "head_columns": HEAD_TO_COLUMN,
         "feature_names": bundle.get("feature_names") if bundle else None,
     }
+
+
+def _predict_heads(
+    bundle: dict[str, Any], X: pd.DataFrame
+) -> dict[str, tuple[str, float]]:
+    """Run every head in the bundle over X. Returns {head_name: (label, confidence)}."""
+    X_arr = X.to_numpy()
+    predictions: dict[str, tuple[str, float]] = {}
+    for head_name, head in bundle["heads"].items():
+        y_pred = head["model"].predict(X_arr)
+        decoded = head["label_encoder"].inverse_transform(np.asarray(y_pred))
+        predictions[head_name] = _majority_vote(decoded)
+    return predictions
 
 
 @app.post("/webhook/predict")
@@ -255,16 +314,11 @@ async def webhook_predict(request: Request) -> dict[str, Any]:
     if bundle is None:
         raise HTTPException(status_code=503, detail="Model not loaded.")
 
-    model = bundle["model"]
-    label_encoder = bundle["label_encoder"]
     feature_names: list[str] = bundle["feature_names"]
-
     X = _record_to_feature_frame(record, feature_names)
 
     try:
-        y_pred = model.predict(X.to_numpy())
-        decoded = label_encoder.inverse_transform(np.asarray(y_pred))
-        predicted_room, confidence = _majority_vote(decoded)
+        head_predictions = _predict_heads(bundle, X)
     except Exception as exc:
         logger.exception("Prediction failed")
         raise HTTPException(status_code=500, detail=f"Prediction failed: {exc}") from exc
@@ -272,23 +326,37 @@ async def webhook_predict(request: Request) -> dict[str, Any]:
     trial_id = record.get("trial_id") or record.get("id")
     n_samples = len(X)
 
+    # Build the DB row from head predictions that map to known columns.
+    # Heads present in the bundle but not in HEAD_TO_COLUMN are still
+    # returned in the HTTP response but not persisted.
+    row: dict[str, Any] = {"trial_id": trial_id}
+    for head_name, column in HEAD_TO_COLUMN.items():
+        if head_name in head_predictions:
+            row[column] = head_predictions[head_name][0]
+
     supabase: Client | None = _state.get("supabase")
     insert_error: str | None = None
     if supabase is not None:
-        row = {"trial_id": trial_id, "predicted_room": predicted_room}
         insert_error = _write_prediction(supabase, row)
 
-    logger.info(
-        "trial_id=%s samples=%d -> predicted_room=%s (confidence=%.2f)",
-        trial_id,
-        n_samples,
-        predicted_room,
-        confidence,
+    # Nice compact log line: "room=kitchen(1.00) location=Floor3Kitchen(0.83)"
+    pretty = " ".join(
+        f"{name}={label}({conf:.2f})"
+        for name, (label, conf) in head_predictions.items()
     )
+    logger.info("trial_id=%s samples=%d -> %s", trial_id, n_samples, pretty)
+
     return {
         "trial_id": trial_id,
-        "predicted_room": predicted_room,
-        "confidence": round(confidence, 4),
         "n_samples": n_samples,
+        "predictions": {
+            name: {"label": label, "confidence": round(conf, 4)}
+            for name, (label, conf) in head_predictions.items()
+        },
+        "written_columns": {
+            column: row[column]
+            for column in HEAD_TO_COLUMN.values()
+            if column in row
+        },
         "insert_error": insert_error,
     }

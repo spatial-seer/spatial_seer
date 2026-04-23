@@ -77,6 +77,34 @@ Supabase sends a JSON body shaped like:
 The endpoint reads `record`, drops `db_id` and `location`, runs the model,
 and inserts `{ trial_id, predicted_room }` into `live_predictions`.
 
+## Multi-head predictions
+
+The model bundle supports multiple prediction heads. The current heads are:
+
+| Head | DB column | Example output |
+| --- | --- | --- |
+| `room` | `predicted_room` | `kitchen`, `hallway` |
+| `location` | `predicted_location` | `Floor3Kitchen`, `Outside3102` |
+
+If you haven't already, add the `predicted_location` column to the
+`live_predictions` table:
+
+```sql
+alter table public.live_predictions
+  add column if not exists predicted_location text;
+```
+
+To add a third head later (e.g. `noise_type`):
+
+1. Train a classifier for it in `create_dummy_model.py` under
+   `heads["noise_type"]`.
+2. Add `"noise_type": "predicted_noise_type"` to `HEAD_TO_COLUMN` in
+   `main.py`.
+3. Run `alter table public.live_predictions add column
+   predicted_noise_type text;`.
+
+No other API changes needed.
+
 ## Idempotency (webhook retries)
 
 Supabase retries webhooks on non-2xx responses and on network timeouts. If
