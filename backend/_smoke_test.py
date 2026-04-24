@@ -1,16 +1,24 @@
 """One-shot smoke test for the MiniRocket wiring. Safe to delete after.
 
 Exercises the full inference pipeline (bundle load, csv_dump parse,
-preprocessing, predict) against a real scan taken from the training CSV,
-WITHOUT standing up uvicorn or hitting Supabase.
+preprocessing, real head predict, derived head lookup) against real
+scans taken from the training CSV, without standing up uvicorn or
+hitting Supabase.
+
+Covers three cases:
+  1. A seen scan (rescan_num == 0) -- sanity: expect a confident,
+     correct prediction.
+  2. A held-out scan (rescan_num == 1) -- honest signal: this is what
+     the demo model actually has to classify.
+  3. A deliberately short csv_dump -- exercises the edge-pad branch.
 """
 
 from __future__ import annotations
 
 import os
 
-# main.py requires Supabase env vars to build a client in lifespan. We
-# only import its helper functions here, so stub values are fine.
+# main.py builds a Supabase client in lifespan. We only import helper
+# functions here, so stub values are fine.
 os.environ.setdefault("SUPABASE_URL", "http://localhost")
 os.environ.setdefault("SUPABASE_KEY", "dummy")
 
@@ -19,58 +27,68 @@ import pandas as pd
 import main as m
 
 
-def run() -> None:
-    bundle = m._load_model_bundle("current_model.pkl")
-    print("bundle OK:", bundle["kind"], "series_length=", bundle["series_length"])
-    print("channels:", bundle["channel_names"])
-    print("preprocessing:", bundle["preprocessing"])
+UNITY_CSV_COLUMNS = [
+    "Timestamp", "TotalUsedMem", "CpuUtil", "GpuUtil", "BatteryMicroAmps",
+    "BatteryTemp", "BatteryLevel", "BatteryVoltageMv", "ScreenBrightness",
+    "AvgFPS", "WorstFrameMs", "BestFrameMs", "MainThreadMs", "GCAllocRate",
+    "FrameTimeStdDev", "CpuClockFreq",
+]
 
-    df = pd.read_csv("../spatial_seer_all_rooms_v3.csv")
-    scan_id = df["scan_id"].iloc[0]
-    scan = df[df["scan_id"] == scan_id]
+
+def run_scan(bundle, scan: pd.DataFrame, label: str) -> None:
     true_room = scan.iloc[0]["room_label"]
     true_loc = scan.iloc[0]["location"]
-    print(
-        f"Test scan_id={scan_id} true_room={true_room} true_loc={true_loc} "
-        f"rows={len(scan)}"
-    )
+    scan_id = scan.iloc[0]["scan_id"]
+    rescan_num = int(scan.iloc[0]["rescan_num"])
+    print(f"\n[{label}] scan_id={scan_id}")
+    print(f"         rescan_num={rescan_num}  rows={len(scan)}")
+    print(f"         true: room={true_room:<12} loc={true_loc}")
 
-    cols_unity = [
-        "Timestamp", "TotalUsedMem", "CpuUtil", "GpuUtil", "BatteryMicroAmps",
-        "BatteryTemp", "BatteryLevel", "BatteryVoltageMv", "ScreenBrightness",
-        "AvgFPS", "WorstFrameMs", "BestFrameMs", "MainThreadMs", "GCAllocRate",
-        "FrameTimeStdDev", "CpuClockFreq",
-    ]
-    csv_dump = scan[cols_unity].to_csv(index=False)
+    csv_dump = scan[UNITY_CSV_COLUMNS].to_csv(index=False)
     record = {"id": 99999, "csv_dump": csv_dump, "device_id": "test"}
-
     x3d, t_raw = m._record_to_time_series(
         record,
         bundle["channel_names"],
         bundle["series_length"],
         bundle["preprocessing"]["sort_by"],
     )
-    print(f"x3d.shape={x3d.shape} dtype={x3d.dtype} t_raw={t_raw}")
     assert x3d.shape == (1, len(bundle["channel_names"]), bundle["series_length"])
 
     preds = m._predict_heads(bundle, x3d)
-    print("predictions:")
-    for name, (label, conf) in preds.items():
-        print(f"  {name:10s}: {label:30s}  conf={conf:.4f}")
+    print(f"         x3d.shape={x3d.shape}  t_raw={t_raw}")
+    for name, (pred_label, conf) in preds.items():
+        mark_label = "room" if name == "room" else ("location" if name == "location" else name)
+        truth = {"room": true_room, "location": true_loc}.get(name, "?")
+        ok = "OK " if pred_label == truth else "MISS"
+        print(f"         {ok} {mark_label:10s}: pred={pred_label:<30} conf={conf:.4f}")
 
-    # Additional: exercise the short-scan edge-pad branch.
-    short = scan[cols_unity].iloc[:3]
-    short_record = {"id": 88888, "csv_dump": short.to_csv(index=False), "device_id": "test"}
-    x3d_s, t_raw_s = m._record_to_time_series(
-        short_record,
-        bundle["channel_names"],
-        bundle["series_length"],
-        bundle["preprocessing"]["sort_by"],
-    )
-    print(f"short scan: t_raw={t_raw_s} -> padded x3d.shape={x3d_s.shape}")
-    preds_s = m._predict_heads(bundle, x3d_s)
-    for name, (label, conf) in preds_s.items():
-        print(f"  {name:10s}: {label:30s}  conf={conf:.4f}")
+
+def run() -> None:
+    bundle = m._load_model_bundle("current_model.pkl")
+    print("bundle:", bundle["kind"])
+    print("  channels      :", bundle["channel_names"])
+    print("  series_length :", bundle["series_length"])
+    print("  preprocessing :", bundle["preprocessing"])
+    print("  real heads    :", list(bundle["heads"].keys()))
+    print("  derived heads :", {k: v["from"] for k, v in bundle.get("derived_heads", {}).items()})
+
+    df = pd.read_csv("../spatial_seer_all_rooms_v3.csv")
+
+    # Case 1: a seen scan (rescan_num == 0).
+    seen_id = df[df["rescan_num"] == 0]["scan_id"].iloc[0]
+    run_scan(bundle, df[df["scan_id"] == seen_id], "seen (rescan_num=0)")
+
+    # Case 2: a held-out scan (rescan_num == 1) in a qualifying location.
+    rescan_df = df[(df["rescan"] == True) & (df["rescan_num"] == 1)]
+    if not rescan_df.empty:
+        holdout_id = rescan_df["scan_id"].iloc[0]
+        run_scan(bundle, df[df["scan_id"] == holdout_id], "held-out (rescan_num=1)")
+    else:
+        print("\n[held-out] no rescan_num==1 scans in CSV; skipping")
+
+    # Case 3: deliberately short scan to exercise edge-pad + derived head.
+    short = df[df["scan_id"] == seen_id].iloc[:3]
+    run_scan(bundle, short, "short scan (padding branch)")
 
 
 if __name__ == "__main__":

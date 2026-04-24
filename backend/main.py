@@ -20,13 +20,18 @@ Bundle shape (produced by `create_dummy_model.py` or the real trainer):
         "series_length":  int,                             # truncation target
         "preprocessing":  {"method": "truncate", "sort_by": "Timestamp"},
         "heads": {
-            "room":     {"model": <est>, "label_encoder": <LabelEncoder>},
             "location": {"model": <est>, "label_encoder": <LabelEncoder>},
+            # ...any number of real estimators...
+        },
+        "derived_heads": {            # optional
+            "room": {"from": "location", "mapping": {"Floor3Kitchen": "kitchen", ...}},
         },
         "kind": "<free-form version tag>",
     }
 
 `feature_names` is accepted as a back-compat alias for `channel_names`.
+Derived heads produce their label via a deterministic lookup on another
+head's prediction; they don't run a model.
 """
 
 from __future__ import annotations
@@ -79,6 +84,7 @@ _state: dict[str, Any] = {"model_bundle": None, "supabase": None}
 # One-time warning guards so we don't spam the log on every webhook.
 _missing_channels_warned: set[str] = set()
 _short_scan_warned = False
+_derived_mapping_miss_warned: set[str] = set()
 
 
 _SUPABASE_KEY_ENV_VARS = (
@@ -192,6 +198,36 @@ def _load_model_bundle(path: str) -> dict[str, Any]:
             raise RuntimeError(
                 f"Head '{head_name}' must be a dict with 'model' and 'label_encoder'."
             )
+
+    # derived_heads is optional. Each entry must reference an existing
+    # real head by name and carry a deterministic string->string mapping.
+    derived = bundle.get("derived_heads") or {}
+    if not isinstance(derived, dict):
+        raise RuntimeError(
+            f"Model bundle 'derived_heads' must be a dict if present, got: {type(derived).__name__}"
+        )
+    for dname, dspec in derived.items():
+        if dname in heads:
+            raise RuntimeError(
+                f"Derived head name '{dname}' collides with a real head. "
+                "Pick a distinct name."
+            )
+        if not isinstance(dspec, dict) or {"from", "mapping"} - set(dspec):
+            raise RuntimeError(
+                f"Derived head '{dname}' must be a dict with 'from' and 'mapping'."
+            )
+        src = dspec["from"]
+        if src not in heads:
+            raise RuntimeError(
+                f"Derived head '{dname}' references unknown source head "
+                f"'{src}'. Known real heads: {list(heads)}."
+            )
+        if not isinstance(dspec["mapping"], dict):
+            raise RuntimeError(
+                f"Derived head '{dname}' mapping must be a dict, got: "
+                f"{type(dspec['mapping']).__name__}"
+            )
+    bundle["derived_heads"] = derived  # normalise (absent -> {})
     return bundle
 
 
@@ -201,9 +237,10 @@ async def lifespan(app: FastAPI):
     bundle = _load_model_bundle(MODEL_PATH)
     _state["model_bundle"] = bundle
     logger.info(
-        "Bundle loaded: kind=%s heads=%s channels=%d series_length=%d preprocessing=%s",
+        "Bundle loaded: kind=%s heads=%s derived=%s channels=%d series_length=%d preprocessing=%s",
         bundle.get("kind"),
         list(bundle["heads"].keys()),
+        list(bundle["derived_heads"].keys()),
         len(bundle["channel_names"]),
         bundle["series_length"],
         bundle["preprocessing"],
@@ -432,12 +469,20 @@ def _write_prediction(supabase: Client, row: dict[str, Any]) -> str | None:
 @app.get("/health")
 def health() -> dict[str, Any]:
     bundle = _state.get("model_bundle")
-    heads = list(bundle["heads"].keys()) if bundle else None
+    real_heads = list(bundle["heads"].keys()) if bundle else None
+    derived = bundle.get("derived_heads") if bundle else None
+    # Surface derived heads as {name: source_head} so ops can see the
+    # topology without dumping the full mapping dict.
+    derived_topology = (
+        {name: spec.get("from") for name, spec in derived.items()}
+        if isinstance(derived, dict) else None
+    )
     return {
         "ok": True,
         "model_loaded": bundle is not None,
         "model_kind": bundle.get("kind") if bundle else None,
-        "heads": heads,
+        "heads": real_heads,
+        "derived_heads": derived_topology,
         "head_columns": HEAD_TO_COLUMN,
         "channel_names": bundle.get("channel_names") if bundle else None,
         "feature_names": bundle.get("channel_names") if bundle else None,
@@ -451,6 +496,11 @@ def _predict_heads(
 ) -> dict[str, tuple[str, float]]:
     """Run every head in the bundle over a single time-series instance.
 
+    Real heads run their model. Derived heads look up a label via a
+    deterministic mapping on another head's result; their confidence is
+    copied from the source head (honest lower bound -- many-to-one
+    collapse can only improve derived accuracy vs source).
+
     Returns {head_name: (label, confidence)}. x3d must be shape
     (1, n_channels, series_length).
     """
@@ -462,6 +512,26 @@ def _predict_heads(
         label = str(head["label_encoder"].inverse_transform(np.asarray([idx]))[0])
         conf = _confidence_from_model(model, x3d)
         predictions[head_name] = (label, conf)
+
+    for dname, dspec in bundle.get("derived_heads", {}).items():
+        src_label, src_conf = predictions[dspec["from"]]
+        mapping: dict[str, str] = dspec["mapping"]
+        derived_label = mapping.get(src_label)
+        if derived_label is None:
+            miss_key = f"{dname}:{src_label}"
+            if miss_key not in _derived_mapping_miss_warned:
+                logger.warning(
+                    "Derived head '%s' has no mapping entry for source label "
+                    "'%s' (from head '%s'); emitting 'unknown'. Further "
+                    "misses for this pair will be suppressed.",
+                    dname,
+                    src_label,
+                    dspec["from"],
+                )
+                _derived_mapping_miss_warned.add(miss_key)
+            derived_label = "unknown"
+        predictions[dname] = (str(derived_label), src_conf)
+
     return predictions
 
 

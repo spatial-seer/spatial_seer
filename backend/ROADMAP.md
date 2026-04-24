@@ -174,6 +174,102 @@ see skew creep.
 - `current_model.pkl` is overwritten on every `create_dummy_model.py`
   run. When the real bundle arrives, just drop it in place.
 
+## 2026-04-23 (later) — rewire to vturcs_models.ipynb (demo model)
+
+### What changed in the source of truth
+
+Switching from `model_4_test.ipynb` to `vturcs_models.ipynb` Cells 1+2.
+Same library (aeon), same channels, same truncation preprocessing. Two
+meaningful differences:
+
+1. **Single real classifier, room is derived.** Cell 2 only fits
+   `MiniRocketClassifier` on location labels. Room type is reconstructed
+   via `loc_to_room[pred_location]`. Previously the bundle carried two
+   independent classifiers.
+2. **Training filter.** Cell 1 trains exclusively on `rescan_num == 0`
+   (baseline scans). Previously the placeholder trained on the full
+   CSV. `rescan_num == 1` is held out for evaluation in the notebook.
+
+A smaller, deliberate note from Cell 1: the `LabelEncoder` for locations
+is fit on `df["location"].unique()` across the **full** dataset, not
+just the training subset. This keeps the encoder's class space stable
+even as training data slices change.
+
+### Bundle contract extension: `derived_heads`
+
+Rather than model the room lookup as a pseudo-head inside `heads`, the
+bundle now has a sibling `derived_heads` block. Clean separation of
+real estimators from deterministic post-processing; generalises if we
+ever need another lookup-derived output (e.g. floor from location).
+
+```python
+{
+    "channel_names":  [...7...],
+    "series_length":  90,
+    "preprocessing":  {"method": "truncate", "sort_by": "Timestamp"},
+    "heads": {
+        "location": {"model": MiniRocketClassifier, "label_encoder": LabelEncoder},
+    },
+    "derived_heads": {
+        "room": {"from": "location", "mapping": {"Floor3Kitchen": "kitchen", ...}},
+    },
+    "kind": "minirocket-vturcs-v1",
+}
+```
+
+Validation rules:
+- `derived_heads` is optional.
+- Each entry must have `from` (points to a real head) and `mapping` (dict).
+- Head-name collisions across `heads` and `derived_heads` are rejected.
+
+### Server behaviour
+
+- `_predict_heads` first runs all real heads, then walks `derived_heads`.
+- Derived label = `mapping[source_label]`; mapping miss → `"unknown"`
+  with a one-time warning. Service keeps flowing.
+- Derived confidence = source head's confidence (honest lower bound;
+  many-to-one collapse can only improve derived accuracy, never hurt it).
+- `HEAD_TO_COLUMN` + DB write path + HTTP response shape all unchanged.
+  Both `predicted_room` and `predicted_location` still land in Supabase.
+- `/health` grows a `derived_heads` field for operator visibility.
+
+### Progress
+
+- **2026-04-23 — rewiring to vturcs demo model in flight.**
+- **2026-04-23 — rewiring complete, smoke test passed.**
+  - `create_dummy_model.py` now filters to `rescan_num == 0`, fits
+    `LabelEncoder` on all 19 locations, fits one
+    `MiniRocketClassifier(random_state=42)` on location labels, and
+    writes `derived_heads["room"]` with the full `loc_to_room` mapping.
+    Produced bundle `kind="minirocket-vturcs-v1"` from 106 training
+    scans in ~50s.
+  - `main.py`: `_load_model_bundle` validates `derived_heads` (optional,
+    name-collision check, references resolved); `_predict_heads` runs
+    real heads first then fills in derived labels via lookup; `/health`
+    returns `derived_heads` topology. Mapping misses emit `"unknown"`
+    with a one-time warning keyed on `(head, src_label)`.
+  - `README.md`: bundle contract + multi-head section rewritten to
+    cover real vs derived heads, including how to add a third head of
+    either kind.
+  - `_smoke_test.py`: now exercises seen scan, held-out
+    `rescan_num == 1` scan, and short-scan edge-pad branch. All green.
+    Held-out `Floor3Kitchen` predicted correctly end-to-end.
+
+### Observation for the demo (not a bug)
+
+Confidence saturates near 1.0 for every prediction because aeon's
+`MiniRocketClassifier` composes with `RidgeClassifierCV`. Its
+`decision_function` yields very wide score spreads on this problem,
+and our stable-softmax cascade collapses to ~1.0. The displayed
+confidences are therefore not useful for "how sure is the model"
+purposes.
+
+If the demo wants meaningful confidence numbers, the trainer should
+swap the classifier head (e.g. MiniRocket features → `LogisticRegression`
+via `sklearn.pipeline.Pipeline`, giving genuine `predict_proba`). The
+server's existing confidence cascade will pick `predict_proba` up
+automatically — no `main.py` change required.
+
 ## Next wiring-agnostic follow-ups (not blocking, not done here)
 
 1. Rename `create_dummy_model.py` → `train_model.py` or

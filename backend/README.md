@@ -105,14 +105,26 @@ the latter path via `RidgeClassifierCV`).
 
 ## Multi-head predictions
 
-The bundle supports multiple heads. Current heads:
+The bundle supports multiple heads, which come in two flavours:
 
-| Head | DB column | Example output |
-| --- | --- | --- |
-| `room` | `predicted_room` | `kitchen`, `hallway` |
-| `location` | `predicted_location` | `Floor3Kitchen`, `Outside3102` |
+- **Real heads** live under `heads` and own a trained model + label
+  encoder. They run `.predict()` on the input tensor.
+- **Derived heads** live under `derived_heads` and produce a label by
+  deterministic lookup from another head's prediction. No model runs;
+  confidence is copied from the source head.
 
-If you haven't already, add the `predicted_location` column to
+Current heads in the demo bundle:
+
+| Head | Kind | Source | DB column | Example output |
+| --- | --- | --- | --- | --- |
+| `location` | real | — | `predicted_location` | `Floor3Kitchen`, `Outside3102` |
+| `room` | derived | `location` | `predicted_room` | `kitchen`, `hallway` |
+
+`HEAD_TO_COLUMN` in `main.py` doesn't care whether a head is real or
+derived — any head present in the bundle **and** in the registry gets
+its label written to the corresponding column in `live_predictions`.
+
+If you haven't already, make sure `predicted_location` exists on
 `live_predictions`:
 
 ```sql
@@ -120,15 +132,22 @@ alter table public.live_predictions
   add column if not exists predicted_location text;
 ```
 
-To add a third head later (e.g. `noise_type`):
+### Adding a third head
 
-1. Train a classifier for it in `create_dummy_model.py` (or the real
-   trainer) under `heads["noise_type"]`.
-2. Add `"noise_type": "predicted_noise_type"` to `HEAD_TO_COLUMN` in
-   `main.py`.
+Real head (e.g. `noise_type` with its own trained classifier):
+
+1. Fit a classifier in the trainer and drop it into
+   `bundle["heads"]["noise_type"]` with a `LabelEncoder`.
+2. Add `"noise_type": "predicted_noise_type"` to `HEAD_TO_COLUMN`.
 3. `alter table public.live_predictions add column predicted_noise_type text;`.
 
-No other API changes needed.
+Derived head (e.g. `floor` looked up from `location`):
+
+1. Add `bundle["derived_heads"]["floor"] = {"from": "location", "mapping": {...}}`.
+2. Add `"floor": "predicted_floor"` to `HEAD_TO_COLUMN`.
+3. `alter table public.live_predictions add column predicted_floor text;`.
+
+No API changes required for either path.
 
 ## Idempotency (webhook retries)
 
@@ -157,16 +176,20 @@ existing row rather than insert a new one.
     "series_length":  int,                             # truncation target
     "preprocessing":  {"method": "truncate", "sort_by": "Timestamp"},
     "heads": {
-        "room":     {"model": <est>, "label_encoder": <LabelEncoder>},
         "location": {"model": <est>, "label_encoder": <LabelEncoder>},
+        # ...any number of real estimators...
     },
-    "kind": "minirocket-aeon-v1",   # free-form version tag
+    "derived_heads": {                                 # optional
+        "room": {"from": "location", "mapping": {"Floor3Kitchen": "kitchen", ...}},
+    },
+    "kind": "minirocket-vturcs-v1",                    # free-form version tag
 }
 ```
 
-- Each head's `model` must accept `.predict(X3d)` where `X3d.shape ==
-  (1, len(channel_names), series_length)` and return an integer array of
-  length 1. aeon's `MiniRocketClassifier` fits this out of the box.
+- Each **real** head's `model` must accept `.predict(X3d)` where
+  `X3d.shape == (1, len(channel_names), series_length)` and return an
+  integer array of length 1. aeon's `MiniRocketClassifier` fits this
+  out of the box.
 - `label_encoder` must expose `.inverse_transform([int]) -> [str]`.
 - `feature_names` is accepted as a back-compat alias for `channel_names`.
 - `series_length` **must** be set at training time — the server refuses
@@ -174,6 +197,11 @@ existing row rather than insert a new one.
 - `preprocessing.method` must be `"truncate"`; any other value is a
   startup error. `preprocessing.sort_by` defaults to `"Timestamp"` if
   omitted.
+- `derived_heads` is optional. Each entry must have `from` (the name of
+  an existing real head) and `mapping` (a `dict[str, str]` translating
+  source labels to derived labels). Name collisions with real heads are
+  rejected at load time. A mapping miss at inference produces `"unknown"`
+  and a one-time warning.
 
 Drop a real bundle at `current_model.pkl` (or point `MODEL_PATH` at it)
 and restart uvicorn. No API, DB, or frontend changes required.
